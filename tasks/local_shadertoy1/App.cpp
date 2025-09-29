@@ -172,7 +172,7 @@ void App::drawFrame()
       currentCmdBuf.bindDescriptorSets(
         vk::PipelineBindPoint::eCompute, pipeline.getVkPipelineLayout(), 0, 1, &vkSet, 0, nullptr);
 
-      float timeFromStart = windowing.getTime();
+      float timeFromStart = static_cast<float>(windowing.getTime());
       float xMouse = osWindow->mouse.freePos.x;
 
       currentCmdBuf.pushConstants(
