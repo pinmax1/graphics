@@ -74,7 +74,25 @@ App::App()
     resolution = {w, h};
   }
 
+  // Next, we need a magical Etna helper to send commands to the GPU.
+  // How it is actually performed is not trivial, but we can skip this for now.
+  commandManager = etna::get_context().createPerFrameCmdMgr();
+
+
   // TODO: Initialize any additional resources you require here!
+
+  etna::create_program("local_shadertoy1", {LOCAL_SHADERTOY1_SHADERS_ROOT "toy.comp.spv"});
+
+  // Buffer creation
+
+  image = context->createImage(etna::Image::CreateInfo{
+    .extent = {resolution.x, resolution.y, 1},
+    .name = "image",
+    .format = vk::Format::eR8G8B8A8Unorm,
+    .imageUsage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc,
+  });
+
+  pipeline = context->getPipelineManager().createComputePipeline("local_shadertoy1", {});
 }
 
 App::~App()
@@ -84,10 +102,10 @@ App::~App()
 
 void App::run()
 {
+
   while (!osWindow->isBeingClosed())
   {
     windowing.poll();
-
     drawFrame();
   }
 
@@ -98,6 +116,7 @@ void App::run()
 
 void App::drawFrame()
 {
+
   // First, get a command buffer to write GPU commands into.
   auto currentCmdBuf = commandManager->acquireNext();
 
@@ -141,6 +160,68 @@ void App::drawFrame()
 
       // TODO: Record your commands here!
 
+      auto simpleComputeInfo = etna::get_shader_program("local_shadertoy1");
+
+      auto set = etna::create_descriptor_set(
+        simpleComputeInfo.getDescriptorLayoutId(0),
+        currentCmdBuf,
+        {
+          etna::Binding{0, image.genBinding({}, vk::ImageLayout::eGeneral)},
+        });
+
+      vk::DescriptorSet vkSet = set.getVkSet();
+
+      currentCmdBuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.getVkPipeline());
+      currentCmdBuf.bindDescriptorSets(
+        vk::PipelineBindPoint::eCompute, pipeline.getVkPipelineLayout(), 0, 1, &vkSet, 0, nullptr);
+
+      float timeFromStart = windowing.getTime();
+      float xMouse = osWindow->mouse.freePos.x;
+
+      currentCmdBuf.pushConstants(
+        pipeline.getVkPipelineLayout(), vk::ShaderStageFlagBits::eCompute, 0, sizeof(float), &timeFromStart);
+      currentCmdBuf.pushConstants(
+        pipeline.getVkPipelineLayout(), vk::ShaderStageFlagBits::eCompute, sizeof(float), sizeof(float), &xMouse);
+
+      etna::set_state(
+        currentCmdBuf,
+        image.get(),
+        vk::PipelineStageFlagBits2::eComputeShader,
+        vk::AccessFlagBits2::eShaderStorageWrite,
+        vk::ImageLayout::eGeneral,
+        vk::ImageAspectFlagBits::eColor);
+      etna::flush_barriers(currentCmdBuf);
+
+      currentCmdBuf.dispatch((resolution.x + 31)/32, (resolution.y + 31)/32, 1);
+
+      etna::set_state(
+        currentCmdBuf,
+        image.get(),
+        vk::PipelineStageFlagBits2::eTransfer,
+        vk::AccessFlagBits2::eTransferRead,
+        vk::ImageLayout::eTransferSrcOptimal,
+        vk::ImageAspectFlagBits::eColor);
+      etna::flush_barriers(currentCmdBuf);
+
+      currentCmdBuf.blitImage(image.get(), vk::ImageLayout::eTransferSrcOptimal,
+       backbuffer, vk::ImageLayout::eTransferDstOptimal, 
+       {vk::ImageBlit{
+        .srcSubresource = vk::ImageSubresourceLayers{
+          .aspectMask = vk::ImageAspectFlagBits::eColor,
+          .mipLevel = 0,
+          .baseArrayLayer = 0 ,
+          .layerCount = 1
+        },
+        .srcOffsets = std::array{vk::Offset3D{0, 0, 0}, vk::Offset3D{static_cast<int>(resolution.x), static_cast<int>(resolution.y), 1}},
+        .dstSubresource = vk::ImageSubresourceLayers{
+          .aspectMask = vk::ImageAspectFlagBits::eColor,
+          .mipLevel = 0,
+          .baseArrayLayer = 0 ,
+          .layerCount = 1
+        },
+        .dstOffsets = std::array{vk::Offset3D{0, 0, 0}, vk::Offset3D{static_cast<int>(resolution.x), static_cast<int>(resolution.y), 1}}
+       }},
+      vk::Filter::eLinear);
 
       // At the end of "rendering", we are required to change how the pixels of the
       // swpchain image are laid out in memory to something that is appropriate
