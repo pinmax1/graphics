@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.30)
 
 
 # Cross-platform WSI
@@ -13,7 +13,7 @@ CPMAddPackage(
 )
 
 # Cross-platform 3D graphics
-find_package(Vulkan 1.4.300 REQUIRED)
+find_package(Vulkan 1.4.328 REQUIRED)
 
 # Dear ImGui -- easiest way to do GUI
 CPMAddPackage(
@@ -54,7 +54,7 @@ CPMAddPackage(
 CPMAddPackage(
   NAME etna
   GITHUB_REPOSITORY AlexandrShcherbakov/etna
-  VERSION 1.10.1
+  VERSION 1.13.1
 )
 
 # Type-erased function containers that actually work

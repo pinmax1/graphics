@@ -350,6 +350,69 @@ SceneManager::ProcessedMeshes SceneManager::processMeshes(const tinygltf::Model&
   return result;
 }
 
+SceneManager::ProcessedMeshes SceneManager::processBaked(const tinygltf::Model& model) const
+{
+  ProcessedMeshes result;
+
+  const auto& buffer      = model.buffers[0].data;
+  const auto& indexView   = model.bufferViews[0];
+  const auto& vertexView  = model.bufferViews[1];
+
+  const std::size_t indexCount  = indexView.byteLength / sizeof(uint32_t);
+  const std::size_t vertexCount = vertexView.byteLength / sizeof(Vertex);
+
+  result.indices.resize(indexCount);
+  result.vertices.resize(vertexCount);
+
+  memcpy(
+    result.indices.data(),
+    buffer.data() + indexView.byteOffset,
+    indexView.byteLength);
+
+  memcpy(
+    result.vertices.data(),
+    buffer.data() + vertexView.byteOffset,
+    vertexView.byteLength);
+
+  std::size_t primitiveCount = 0;
+  for (const auto& m : model.meshes) {
+    primitiveCount += m.primitives.size();
+  }
+
+  result.relems.reserve(primitiveCount);
+  result.meshes.reserve(model.meshes.size());
+
+  for (const auto& m : model.meshes)
+  {
+    Mesh meshInfo{};
+    meshInfo.firstRelem = static_cast<uint32_t>(result.relems.size());
+    meshInfo.relemCount = static_cast<uint32_t>(m.primitives.size());
+
+    for (const auto& p : m.primitives)
+    {
+      const auto& indexAccessor =
+        model.accessors[p.indices];
+      const auto& positionAccessor =
+        model.accessors.at(p.attributes.at("POSITION"));
+
+      RenderElement elem{};
+      elem.vertexOffset =
+        static_cast<uint32_t>(positionAccessor.byteOffset / sizeof(Vertex));
+      elem.indexOffset =
+        static_cast<uint32_t>(indexAccessor.byteOffset / sizeof(std::uint32_t));
+      elem.indexCount =
+        static_cast<uint32_t>(indexAccessor.count);
+
+      result.relems.push_back(elem);
+    }
+
+    result.meshes.push_back(meshInfo);
+  }
+
+  return result;
+}
+
+
 void SceneManager::uploadData(
   std::span<const Vertex> vertices, std::span<const std::uint32_t> indices)
 {
@@ -388,7 +451,7 @@ void SceneManager::selectScene(std::filesystem::path path)
   instanceMatrices = std::move(instMats);
   instanceMeshes = std::move(instMeshes);
 
-  auto [verts, inds, relems, meshs] = processMeshes(model);
+  auto [verts, inds, relems, meshs] = processBaked(model);
 
   renderElements = std::move(relems);
   meshes = std::move(meshs);
