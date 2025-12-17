@@ -83,8 +83,22 @@ App::App()
   etna::create_program("toy", {LOCAL_SHADERTOY2_SHADERS_ROOT "toy.vert.spv", LOCAL_SHADERTOY2_SHADERS_ROOT "toy.frag.spv"});
   etna::create_program("texture", {LOCAL_SHADERTOY2_SHADERS_ROOT "texture.vert.spv", LOCAL_SHADERTOY2_SHADERS_ROOT "texture.frag.spv"});
 
-  mainPipeline = context->getPipelineManager().createGraphicsPipeline("toy", {});
-  texturePipeline = context->getPipelineManager().createGraphicsPipeline("texture", {});
+  mainPipeline = context->getPipelineManager().createGraphicsPipeline(
+    "toy",
+    {
+    .fragmentShaderOutput =
+    {
+      .colorAttachmentFormats = {vk::Format::eB8G8R8A8Srgb},
+    },
+  });
+  texturePipeline = context->getPipelineManager().createGraphicsPipeline(
+    "texture", 
+    {
+    .fragmentShaderOutput =
+    {
+      .colorAttachmentFormats = {vk::Format::eR8G8B8A8Unorm},
+    },
+  });
 
 
   image = context->createImage(etna::Image::CreateInfo{
@@ -106,8 +120,8 @@ App::App()
 
   auto mgr = context->createOneShotCmdMgr();
   int x,y,n;
-  const char* filename = "./textures/texture1.bmp";
-  unsigned char* data = stbi_load(filename, &x, &y, &n, 4);
+  std::string filename = std::string(GRAPHICS_COURSE_RESOURCES_ROOT) + "/textures/texture1.bmp";
+  unsigned char* data = stbi_load(filename.c_str(), &x, &y, &n, 4);
   assert(data != nullptr);
   etna::BlockingTransferHelper transferHelper{etna::BlockingTransferHelper::CreateInfo{.stagingSize = static_cast<size_t>(2 * 1024 * 1024)}};
   transferHelper.uploadImage(*mgr, textureImage, 0, 0, std::span<const std::byte>{reinterpret_cast<const std::byte*>(data), (static_cast<size_t>(x * y * 4))});
