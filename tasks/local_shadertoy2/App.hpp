@@ -4,9 +4,11 @@
 #include <etna/PerFrameCmdMgr.hpp>
 #include <etna/ComputePipeline.hpp>
 #include <etna/Image.hpp>
+#include <etna/Sampler.hpp>
 #include <etna/Etna.hpp>
+#include <etna/GraphicsPipeline.hpp>
+#include <etna/BlockingTransferHelper.hpp>
 #include "wsi/OsWindowingManager.hpp"
-
 
 class App
 {
@@ -32,5 +34,9 @@ private:
 
   etna::GlobalContext* context;
   etna::Image image;
-  etna::ComputePipeline pipeline;
+  etna::Image textureImage;
+  etna::Sampler defaultSampler;
+  etna::Sampler defaultTextureSampler;
+  etna::GraphicsPipeline mainPipeline;
+  etna::GraphicsPipeline texturePipeline;
 };
