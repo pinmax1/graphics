@@ -1,23 +1,28 @@
-#include "SceneManager.hpp"
-
-#include <stack>
-
+#include <filesystem>
+#include <glm/glm.hpp>
 #include <spdlog/spdlog.h>
-#include <fmt/std.h>
-#include <glm/ext/matrix_transform.hpp>
-#include <glm/gtc/quaternion.hpp>
-#include <etna/GlobalContext.hpp>
-#include <etna/OneShotCmdMgr.hpp>
+#include <optional>
+#include "tiny_gltf.h"
+#include "Baker.hpp"
 
-
-SceneManager::SceneManager()
-  : oneShotCommands{etna::get_context().createOneShotCmdMgr()}
-  , transferHelper{etna::BlockingTransferHelper::CreateInfo{.stagingSize = 4096 * 4096 * 4}}
+std::uint32_t encode_normal(glm::vec3 normal)
 {
+  const int32_t x = (std::lround(normal.x * 127.0f) & 0x000000ff);
+  const int32_t y = (std::lround(normal.y * 127.0f) & 0x000000ff) << 8;
+  const int32_t z = (std::lround(normal.z * 127.0f) & 0x000000ff) << 16;
+  const int32_t w = (127 & 0x000000ff) << 24;
+
+  const int32_t res = x | y | z | w;
+
+  return std::bit_cast<std::uint32_t>(res);
 }
 
-std::optional<tinygltf::Model> SceneManager::loadModel(std::filesystem::path path)
+
+
+std::optional<tinygltf::Model> loadModel(std::filesystem::path path)
 {
+  tinygltf::TinyGLTF loader;
+  loader.SetImagesAsIs(true);
   tinygltf::Model model;
 
   std::string error;
@@ -31,7 +36,7 @@ std::optional<tinygltf::Model> SceneManager::loadModel(std::filesystem::path pat
     success = loader.LoadBinaryFromFile(&model, &error, &warning, path.string());
   else
   {
-    spdlog::error("glTF: Unknown glTF file extension: '{}'. Expected .gltf or .glb.", ext);
+    spdlog::error("glTF: Unknown glTF file extension. Expected .gltf or .glb.");
     return std::nullopt;
   }
 
@@ -53,99 +58,24 @@ std::optional<tinygltf::Model> SceneManager::loadModel(std::filesystem::path pat
   return model;
 }
 
-SceneManager::ProcessedInstances SceneManager::processInstances(const tinygltf::Model& model) const
+int saveModel(tinygltf::Model& model, std::filesystem::path& path) 
 {
-  std::vector nodeTransforms(model.nodes.size(), glm::identity<glm::mat4x4>());
+  tinygltf::TinyGLTF saver;
+  saver.SetImagesAsIs(true);
+  bool success = false;
 
-  for (std::size_t nodeIdx = 0; nodeIdx < model.nodes.size(); ++nodeIdx)
+  success = saver.WriteGltfSceneToFile(&model, path.string(), 0, 0, 1, 0);
+  if (!success)
   {
-    const auto& node = model.nodes[nodeIdx];
-    auto& transform = nodeTransforms[nodeIdx];
-
-    if (!node.matrix.empty())
-    {
-      for (int i = 0; i < 4; ++i)
-        for (int j = 0; j < 4; ++j)
-          transform[i][j] = static_cast<float>(node.matrix[4 * i + j]);
-    }
-    else
-    {
-      if (!node.scale.empty())
-        transform = scale(
-          transform,
-          glm::vec3(
-            static_cast<float>(node.scale[0]),
-            static_cast<float>(node.scale[1]),
-            static_cast<float>(node.scale[2])));
-
-      if (!node.rotation.empty())
-        transform *= mat4_cast(glm::quat(
-          static_cast<float>(node.rotation[3]),
-          static_cast<float>(node.rotation[0]),
-          static_cast<float>(node.rotation[1]),
-          static_cast<float>(node.rotation[2])));
-
-      if (!node.translation.empty())
-        transform = translate(
-          transform,
-          glm::vec3(
-            static_cast<float>(node.translation[0]),
-            static_cast<float>(node.translation[1]),
-            static_cast<float>(node.translation[2])));
-    }
+    spdlog::error("glTF: Failed to save model!");
+    return 1;
   }
-
-  std::stack<std::size_t> vertices;
-  for (auto vert : model.scenes[model.defaultScene].nodes)
-    vertices.push(vert);
-
-  while (!vertices.empty())
-  {
-    auto vert = vertices.top();
-    vertices.pop();
-
-    for (auto child : model.nodes[vert].children)
-    {
-      nodeTransforms[child] = nodeTransforms[vert] * nodeTransforms[child];
-      vertices.push(child);
-    }
-  }
-
-  ProcessedInstances result;
-
-  // Don't overallocate matrices, they are pretty chonky.
-  {
-    std::size_t totalNodesWithMeshes = 0;
-    for (std::size_t i = 0; i < model.nodes.size(); ++i)
-      if (model.nodes[i].mesh >= 0)
-        ++totalNodesWithMeshes;
-    result.matrices.reserve(totalNodesWithMeshes);
-    result.meshes.reserve(totalNodesWithMeshes);
-  }
-
-  for (std::size_t i = 0; i < model.nodes.size(); ++i)
-    if (model.nodes[i].mesh >= 0)
-    {
-      result.matrices.push_back(nodeTransforms[i]);
-      result.meshes.push_back(model.nodes[i].mesh);
-    }
-
-  return result;
+  return 0;
 }
 
-static std::uint32_t encode_normal(glm::vec3 normal)
-{
-  const std::int32_t x = static_cast<std::int32_t>(normal.x * 32767.0f);
-  const std::int32_t y = static_cast<std::int32_t>(normal.y * 32767.0f);
 
-  const std::uint32_t sign = normal.z >= 0 ? 0 : 1;
-  const std::uint32_t sx = static_cast<std::uint32_t>(x & 0xfffe) | sign;
-  const std::uint32_t sy = static_cast<std::uint32_t>(y & 0xffff) << 16;
 
-  return sx | sy;
-}
-
-SceneManager::ProcessedMeshes SceneManager::processMeshes(const tinygltf::Model& model) const
+ProcessedMeshes processMeshes(const tinygltf::Model& model)
 {
   // NOTE: glTF assets can have pretty wonky data layouts which are not appropriate
   // for real-time rendering, so we have to press the data first. In serious engines
@@ -157,8 +87,8 @@ SceneManager::ProcessedMeshes SceneManager::processMeshes(const tinygltf::Model&
   // Pre-allocate enough memory so as not to hit the
   // allocator on the memcpy hotpath
   {
-    std::size_t vertexBytes = 0;
-    std::size_t indexBytes = 0;
+    size_t vertexBytes = 0;
+    size_t indexBytes = 0;
     for (const auto& bufView : model.bufferViews)
     {
       switch (bufView.target)
@@ -178,7 +108,7 @@ SceneManager::ProcessedMeshes SceneManager::processMeshes(const tinygltf::Model&
   }
 
   {
-    std::size_t totalPrimitives = 0;
+    size_t totalPrimitives = 0;
     for (const auto& mesh : model.meshes)
       totalPrimitives += mesh.primitives.size();
     result.relems.reserve(totalPrimitives);
@@ -240,7 +170,7 @@ SceneManager::ProcessedMeshes SceneManager::processMeshes(const tinygltf::Model&
         .indexCount = static_cast<std::uint32_t>(accessors[0]->count),
       });
 
-      const std::size_t vertexCount = accessors[1]->count;
+      const size_t vertexCount = accessors[1]->count;
 
       std::array ptrs{
         reinterpret_cast<const std::byte*>(model.buffers[bufViews[0]->buffer].data.data()) +
@@ -287,7 +217,7 @@ SceneManager::ProcessedMeshes SceneManager::processMeshes(const tinygltf::Model&
                     : 0,
       };
 
-      for (std::size_t i = 0; i < vertexCount; ++i)
+      for (size_t i = 0; i < vertexCount; ++i)
       {
         auto& vtx = result.vertices.emplace_back();
         glm::vec3 pos;
@@ -323,11 +253,10 @@ SceneManager::ProcessedMeshes SceneManager::processMeshes(const tinygltf::Model&
       }
 
       // Indices are guaranteed to have no stride
-      ETNA_VERIFY(bufViews[0]->byteStride == 0);
-      const std::size_t indexCount = accessors[0]->count;
+      const size_t indexCount = accessors[0]->count;
       if (accessors[0]->componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT)
       {
-        for (std::size_t i = 0; i < indexCount; ++i)
+        for (size_t i = 0; i < indexCount; ++i)
         {
           std::uint16_t index;
           std::memcpy(&index, ptrs[0], sizeof(index));
@@ -337,7 +266,7 @@ SceneManager::ProcessedMeshes SceneManager::processMeshes(const tinygltf::Model&
       }
       else if (accessors[0]->componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT)
       {
-        const std::size_t lastTotalIndices = result.indices.size();
+        const size_t lastTotalIndices = result.indices.size();
         result.indices.resize(lastTotalIndices + indexCount);
         std::memcpy(
           result.indices.data() + lastTotalIndices,
@@ -350,126 +279,190 @@ SceneManager::ProcessedMeshes SceneManager::processMeshes(const tinygltf::Model&
   return result;
 }
 
-SceneManager::ProcessedMeshes SceneManager::processBaked(const tinygltf::Model& model) const
+
+
+int bakeModel(std::filesystem::path modelPath)
 {
-  ProcessedMeshes result;
-
-  const auto& buffer      = model.buffers[0].data;
-  const auto& indexView   = model.bufferViews[0];
-  const auto& vertexView  = model.bufferViews[1];
-
-  const std::size_t indexCount  = indexView.byteLength / sizeof(uint32_t);
-  const std::size_t vertexCount = vertexView.byteLength / sizeof(Vertex);
-
-  result.indices.resize(indexCount);
-  result.vertices.resize(vertexCount);
-
-  memcpy(
-    result.indices.data(),
-    buffer.data() + indexView.byteOffset,
-    indexView.byteLength);
-
-  memcpy(
-    result.vertices.data(),
-    buffer.data() + vertexView.byteOffset,
-    vertexView.byteLength);
-
-  std::size_t primitiveCount = 0;
-  for (const auto& m : model.meshes) {
-    primitiveCount += m.primitives.size();
-  }
-
-  result.relems.reserve(primitiveCount);
-  result.meshes.reserve(model.meshes.size());
-
-  for (const auto& m : model.meshes)
+  std::filesystem::path bakedModelPath;
+  std::filesystem::path bakedBinPath;
   {
-    Mesh meshInfo{};
-    meshInfo.firstRelem = static_cast<uint32_t>(result.relems.size());
-    meshInfo.relemCount = static_cast<uint32_t>(m.primitives.size());
-
-    for (const auto& p : m.primitives)
-    {
-      const auto& indexAccessor =
-        model.accessors[p.indices];
-      const auto& positionAccessor =
-        model.accessors.at(p.attributes.at("POSITION"));
-
-      RenderElement elem{};
-      elem.vertexOffset =
-        static_cast<uint32_t>(positionAccessor.byteOffset / sizeof(Vertex));
-      elem.indexOffset =
-        static_cast<uint32_t>(indexAccessor.byteOffset / sizeof(std::uint32_t));
-      elem.indexCount =
-        static_cast<uint32_t>(indexAccessor.count);
-
-      result.relems.push_back(elem);
-    }
-
-    result.meshes.push_back(meshInfo);
+      const std::filesystem::path modelDir  = modelPath.parent_path();
+      const std::filesystem::path modelName = modelPath.stem();
+      bakedModelPath = modelDir / (modelName.string() + "_baked.gltf");
+      bakedBinPath   = modelDir / (modelName.string() + "_baked.bin");
   }
 
-  return result;
-}
-
-void SceneManager::uploadData(
-  std::span<const Vertex> vertices, std::span<const std::uint32_t> indices)
-{
-  unifiedVbuf = etna::get_context().createBuffer(etna::Buffer::CreateInfo{
-    .size = vertices.size_bytes(),
-    .bufferUsage = vk::BufferUsageFlagBits::eTransferDst | vk::BufferUsageFlagBits::eVertexBuffer,
-    .memoryUsage = VMA_MEMORY_USAGE_GPU_ONLY,
-    .name = "unifiedVbuf",
-  });
-
-  unifiedIbuf = etna::get_context().createBuffer(etna::Buffer::CreateInfo{
-    .size = indices.size_bytes(),
-    .bufferUsage = vk::BufferUsageFlagBits::eTransferDst | vk::BufferUsageFlagBits::eIndexBuffer,
-    .memoryUsage = VMA_MEMORY_USAGE_GPU_ONLY,
-    .name = "unifiedIbuf",
-  });
-
-  transferHelper.uploadBuffer<Vertex>(*oneShotCommands, unifiedVbuf, 0, vertices);
-  transferHelper.uploadBuffer<std::uint32_t>(*oneShotCommands, unifiedIbuf, 0, indices);
-}
-
-void SceneManager::selectScene(std::filesystem::path path)
-{
-  auto maybeModel = loadModel(path);
+  auto maybeModel = loadModel(modelPath);
   if (!maybeModel.has_value())
-    return;
+    return 1;
+  tinygltf::Model model = std::move(*maybeModel);
 
-  auto model = std::move(*maybeModel);
+  auto bakedModel = processMeshes(model);
 
-  // By aggregating all SceneManager fields mutations here,
-  // we guarantee that we don't forget to clear something
-  // when re-loading a scene.
+  size_t indiciesSize = bakedModel.indices.size() * sizeof(uint32_t);
+  size_t verticesOffset = (indiciesSize + 15) / 16 * 16;
+  size_t verticesSize = bakedModel.vertices.size() * sizeof(Vertex);
 
-  // NOTE: you might want to store these on the GPU for GPU-driven rendering.
-  auto [instMats, instMeshes] = processInstances(model);
-  instanceMatrices = std::move(instMats);
-  instanceMeshes = std::move(instMeshes);
+  {
+    tinygltf::Buffer buffer;
+    buffer.name = bakedBinPath.stem().string();
+    buffer.uri = bakedBinPath.filename().string();
+    buffer.data.resize(verticesOffset + verticesSize);
 
-  auto [verts, inds, relems, meshs] = processBaked(model);
+    memcpy(buffer.data.data(), bakedModel.indices.data(), indiciesSize);
+    memcpy(buffer.data.data() + verticesOffset, bakedModel.vertices.data(), verticesSize);
 
-  renderElements = std::move(relems);
-  meshes = std::move(meshs);
+    model.buffers.clear();
+    model.buffers.push_back(std::move(buffer));
+  }
 
-  uploadData(verts, inds);
-}
+  {
+    tinygltf::BufferView bufferViews[2]{};
 
-etna::VertexByteStreamFormatDescription SceneManager::getVertexFormatDescription()
-{
-  return etna::VertexByteStreamFormatDescription{
-    .stride = sizeof(Vertex),
-    .attributes = {
-      etna::VertexByteStreamFormatDescription::Attribute{
-        .format = vk::Format::eR32G32B32A32Sfloat,
-        .offset = 0,
-      },
-      etna::VertexByteStreamFormatDescription::Attribute{
-        .format = vk::Format::eR32G32B32A32Sfloat,
-        .offset = sizeof(glm::vec4),
-      },
-    }};
+    bufferViews[0].name = "baked_indicies";
+    bufferViews[0].buffer = 0;
+    bufferViews[0].byteOffset = 0;
+    bufferViews[0].byteLength = indiciesSize;
+    bufferViews[0].byteStride = 0;
+    bufferViews[0].target = TINYGLTF_TARGET_ELEMENT_ARRAY_BUFFER;
+
+    bufferViews[1].name = "baked_vertices";
+    bufferViews[1].buffer = 0;
+    bufferViews[1].byteOffset = verticesOffset;
+    bufferViews[1].byteLength = verticesSize;
+    bufferViews[1].byteStride = sizeof(Vertex);
+    bufferViews[1].target = TINYGLTF_TARGET_ARRAY_BUFFER;
+
+    model.bufferViews.clear();
+    model.bufferViews.push_back(bufferViews[0]);
+    model.bufferViews.push_back(bufferViews[1]);
+  }
+
+  tinygltf::Accessor indexAccessor{};
+  indexAccessor.bufferView    = 0;
+  indexAccessor.type          = TINYGLTF_TYPE_SCALAR;
+  indexAccessor.componentType = TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT;
+  indexAccessor.normalized    = false;
+
+  tinygltf::Accessor positionAccessor{};
+  positionAccessor.bufferView    = 1;
+  positionAccessor.type          = TINYGLTF_TYPE_VEC3;
+  positionAccessor.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
+  positionAccessor.normalized    = false;
+
+  tinygltf::Accessor normalAccessor{};
+  normalAccessor.bufferView    = 1;
+  normalAccessor.type          = TINYGLTF_TYPE_VEC3;
+  normalAccessor.componentType = TINYGLTF_COMPONENT_TYPE_BYTE;
+  normalAccessor.normalized    = true;
+
+  tinygltf::Accessor texcoordAccessor{};
+  texcoordAccessor.bufferView    = 1;
+  texcoordAccessor.type          = TINYGLTF_TYPE_VEC2;
+  texcoordAccessor.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
+  texcoordAccessor.normalized    = false;
+
+  tinygltf::Accessor tangentAccessor{};
+  tangentAccessor.bufferView    = 1;
+  tangentAccessor.type          = TINYGLTF_TYPE_VEC4;
+  tangentAccessor.componentType = TINYGLTF_COMPONENT_TYPE_BYTE;
+  tangentAccessor.normalized    = true;
+
+  std::vector<tinygltf::Accessor> newAccessors;
+
+  for (uint32_t meshIndex = 0; meshIndex < model.meshes.size(); ++meshIndex)
+  {
+      auto& mesh = model.meshes[meshIndex];
+
+      for (uint32_t primIndex = 0; primIndex < mesh.primitives.size(); ++primIndex)
+      {
+          auto& primitive = mesh.primitives[primIndex];
+
+          const bool hasNormals  = primitive.attributes.count("NORMAL")     != 0;
+          const bool hasTexcoord = primitive.attributes.count("TEXCOORD_0")  != 0;
+          const bool hasTangents = primitive.attributes.count("TANGENT")     != 0;
+
+          auto& relem = bakedModel.relems[bakedModel.meshes[meshIndex].firstRelem + primIndex];
+          const uint32_t indexOffset  = relem.indexOffset;
+          const uint32_t indexCount   = relem.indexCount;
+          const uint32_t vertexOffset = relem.vertexOffset;
+
+          uint32_t maxIndex = 0;
+          glm::vec3 minValues = glm::vec3(bakedModel.vertices[vertexOffset].positionAndNormal);
+          glm::vec3 maxValues = minValues;
+
+          for (uint32_t i = 0; i < indexCount; ++i)
+          {
+              const uint32_t index = bakedModel.indices[indexOffset + i];
+              maxIndex = std::max(maxIndex, index);
+
+              const glm::vec3 pos = glm::vec3(bakedModel.vertices[vertexOffset + index].positionAndNormal);
+              minValues = glm::min(minValues, pos);
+              maxValues = glm::max(maxValues, pos);
+          }
+
+          {
+              auto accessor = indexAccessor;
+              accessor.name       = "baked_indices_accessor";
+              accessor.byteOffset = indexOffset * sizeof(uint32_t);
+              accessor.count      = indexCount;
+
+              primitive.indices = static_cast<int>(newAccessors.size());
+              newAccessors.push_back(std::move(accessor));
+          }
+
+          primitive.attributes.clear();
+
+          {
+              auto accessor = positionAccessor;
+              accessor.name       = "baked_position_accessor";
+              accessor.byteOffset = vertexOffset * sizeof(Vertex);
+              accessor.count      = maxIndex + 1;
+              accessor.minValues  = {minValues.x, minValues.y, minValues.z};
+              accessor.maxValues  = {maxValues.x, maxValues.y, maxValues.z};
+
+              primitive.attributes["POSITION"] = static_cast<int>(newAccessors.size());
+              newAccessors.push_back(std::move(accessor));
+          }
+
+          if (hasNormals)
+          {
+              auto accessor = normalAccessor;
+              accessor.name       = "baked_normal_accessor";
+              accessor.byteOffset = vertexOffset * sizeof(Vertex) + 3 * sizeof(float);
+              accessor.count      = maxIndex + 1;
+
+              primitive.attributes["NORMAL"] = static_cast<int>(newAccessors.size());
+              newAccessors.push_back(std::move(accessor));
+          }
+
+          if (hasTexcoord)
+          {
+              auto accessor = texcoordAccessor;
+              accessor.name       = "baked_texcoord_accessor";
+              accessor.byteOffset = vertexOffset * sizeof(Vertex) + 4 * sizeof(float);
+              accessor.count      = maxIndex + 1;
+
+              primitive.attributes["TEXCOORD_0"] = static_cast<int>(newAccessors.size());
+              newAccessors.push_back(std::move(accessor));
+          }
+
+          if (hasTangents)
+          {
+              auto accessor = tangentAccessor;
+              accessor.name       = "baked_tangent_accessor";
+              accessor.byteOffset = vertexOffset * sizeof(Vertex) + 6 * sizeof(float);
+              accessor.count      = maxIndex + 1;
+
+              primitive.attributes["TANGENT"] = static_cast<int>(newAccessors.size());
+              newAccessors.push_back(std::move(accessor));
+          }
+      }
+  }
+
+  model.accessors = std::move(newAccessors);
+  saveModel(model, bakedModelPath);
+
+
+  return 0;
 }
