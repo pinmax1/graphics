@@ -1,0 +1,81 @@
+#version 450
+
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(push_constant) uniform params_t
+{
+  vec4 camPos;
+  float time;
+  float radius;
+  float spacing;
+  float terrainSize;
+} params;
+
+struct GrassBlade
+{
+  vec4 posAndRotation;
+  vec4 params;         // x = высота травинки, y = ширина, z = wind phase, w = unused
+};
+
+layout(set = 0, binding = 0) buffer GrassInstances
+{
+  uint count;
+  uint pad0, pad1, pad2;
+  GrassBlade blades[];
+} grassData;
+
+layout(set = 0, binding = 1) uniform sampler2D heightmapTex;
+
+float hash(vec2 p)
+{
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
+}
+
+void main()
+{
+  int gridSize = int(2.0 * params.radius / params.spacing);
+
+  int gx = int(gl_GlobalInvocationID.x);
+  int gy = int(gl_GlobalInvocationID.y);
+
+  if (gx >= gridSize || gy >= gridSize)
+    return;
+
+  int gridHalf = gridSize / 2;
+  int centerCellX = int(floor(params.camPos.x / params.spacing));
+  int centerCellZ = int(floor(params.camPos.z / params.spacing));
+  int cellX = centerCellX - gridHalf + gx;
+  int cellZ = centerCellZ - gridHalf + gy;
+
+  float baseX = float(cellX) * params.spacing;
+  float baseZ = float(cellZ) * params.spacing;
+
+  float rnd = hash(vec2(baseX, baseZ));
+  float rnd2 = hash(vec2(baseZ, baseX));
+  baseX += (rnd - 0.5) * params.spacing * 0.8;
+  baseZ += (rnd2 - 0.5) * params.spacing * 0.8;
+
+  float dx = baseX - params.camPos.x;
+  float dz = baseZ - params.camPos.z;
+  if (dx * dx + dz * dz > params.radius * params.radius)
+    return;
+
+  if (baseX < 0.0 || baseX > params.terrainSize || baseZ < 0.0 || baseZ > params.terrainSize)
+    return;
+
+  vec2 uv = vec2(baseX, baseZ) / params.terrainSize;
+  float terrainHeight = texture(heightmapTex, uv).r * 15.0; // heightScale = 15.0
+
+  uint idx = atomicAdd(grassData.count, 1);
+
+  float rotation = rnd * 3.14159265 * 2.0;
+  float bladeHeight = 0.3 + rnd2 * 0.4;
+  float bladeWidth = 0.02 + rnd * 0.03;
+  float windPhase = hash(vec2(baseX * 7.3, baseZ * 13.7));
+
+  grassData.blades[idx].posAndRotation = vec4(baseX, terrainHeight, baseZ, rotation);
+  grassData.blades[idx].params = vec4(bladeHeight, bladeWidth, windPhase, 0.0);
+}
