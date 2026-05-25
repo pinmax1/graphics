@@ -5,6 +5,7 @@ layout(push_constant) uniform params_t
   mat4 mProjView;
   vec4 chunkOffset;
   vec4 camPos;
+  vec4 clipmapCenter;
 } params;
 
 const vec2 positions[4] = vec2[4](
