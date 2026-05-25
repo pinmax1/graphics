@@ -93,7 +93,6 @@ vec4 fxaa311(vec2 uv) {
   if (lumaRange < max(FXAA_EDGE_THRESHOLD_MIN, lumaMax * FXAA_EDGE_THRESHOLD))
     return texture(colorTex, uv);
 
-  // ── 3. Диагональные соседи для субпиксельного блендинга ─────────
   float lumaNW = luma(texture(colorTex, uv + vec2(-r.x,  r.y)).rgb);
   float lumaNE = luma(texture(colorTex, uv + vec2( r.x,  r.y)).rgb);
   float lumaSW = luma(texture(colorTex, uv + vec2(-r.x, -r.y)).rgb);
