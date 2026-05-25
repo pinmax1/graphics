@@ -22,4 +22,16 @@ vec3 decode_normal(uint a_data)
   return vec3(x, y, z);
 }
 
+vec3 decode_baked_normal(uint a_data)
+{
+  const uint a_enc_x = (a_data & 0x000000FFu);
+  const uint a_enc_y = ((a_data & 0x0000FF00u) >> 8);
+  const uint a_enc_z = ((a_data & 0x00FF0000u) >> 16);
+
+  ivec3 vec = ivec3(a_enc_x, a_enc_y, a_enc_z);
+  vec3 decoded = vec3((vec + 128) % 256 - 128);
+
+  return max((decoded) / 127.0, -1.0);
+}
+
 #endif // UNPACK_ATTRIBUTES_GLSL_INCLUDED
