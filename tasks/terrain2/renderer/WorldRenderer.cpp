@@ -121,6 +121,7 @@ void WorldRenderer::allocateResources(glm::uvec2 swapchain_resolution)
   generateHeightmap();
   generateSplatmap();
   loadDetailTextures();
+  allocateClipmapResources();
 
   grassInstanceBuffer = ctx.createBuffer(etna::Buffer::CreateInfo{
     .size = 16 + maxGrassBlades * 32,
@@ -328,6 +329,95 @@ void WorldRenderer::loadDetailTextures()
   }
 }
 
+void WorldRenderer::allocateClipmapResources()
+{
+  auto& ctx = etna::get_context();
+
+  for (int i = 0; i < CLIPMAP_CASCADES; ++i)
+  {
+    clipmapImages[i] = ctx.createImage(etna::Image::CreateInfo{
+      .extent = vk::Extent3D{CLIPMAP_SIZE, CLIPMAP_SIZE, 1},
+      .name = "clipmap_cascade",
+      .format = vk::Format::eR8G8B8A8Unorm,
+      .imageUsage = vk::ImageUsageFlagBits::eSampled
+                  | vk::ImageUsageFlagBits::eColorAttachment,
+    });
+  }
+
+  clipmapSampler = etna::Sampler(etna::Sampler::CreateInfo{
+    .filter = vk::Filter::eLinear,
+    .addressMode = vk::SamplerAddressMode::eClampToEdge,
+    .name = "clipmap_sampler",
+  });
+}
+
+void WorldRenderer::updateClipmapCascades(vk::CommandBuffer cmd_buf)
+{
+  auto programInfo = etna::get_shader_program("clipmap_update");
+
+  for (int cascadeIdx = 0; cascadeIdx < CLIPMAP_CASCADES; ++cascadeIdx)
+  {
+    auto set = etna::create_descriptor_set(
+      programInfo.getDescriptorLayoutId(0),
+      cmd_buf,
+      {
+        etna::Binding{0, heightmap.genBinding(heightmapSampler.get(), vk::ImageLayout::eShaderReadOnlyOptimal)},
+        etna::Binding{1, splatmap.genBinding(splatmapSampler.get(), vk::ImageLayout::eShaderReadOnlyOptimal)},
+        etna::Binding{2, detailTextures[0].genBinding(detailSampler.get(), vk::ImageLayout::eShaderReadOnlyOptimal)},
+        etna::Binding{3, detailTextures[1].genBinding(detailSampler.get(), vk::ImageLayout::eShaderReadOnlyOptimal)},
+        etna::Binding{4, detailTextures[2].genBinding(detailSampler.get(), vk::ImageLayout::eShaderReadOnlyOptimal)},
+        etna::Binding{5, detailTextures[3].genBinding(detailSampler.get(), vk::ImageLayout::eShaderReadOnlyOptimal)},
+        etna::Binding{6, detailHeightmaps[0].genBinding(detailSampler.get(), vk::ImageLayout::eShaderReadOnlyOptimal)},
+        etna::Binding{7, detailHeightmaps[1].genBinding(detailSampler.get(), vk::ImageLayout::eShaderReadOnlyOptimal)},
+        etna::Binding{8, detailHeightmaps[2].genBinding(detailSampler.get(), vk::ImageLayout::eShaderReadOnlyOptimal)},
+        etna::Binding{9, detailHeightmaps[3].genBinding(detailSampler.get(), vk::ImageLayout::eShaderReadOnlyOptimal)},
+      });
+
+    etna::RenderTargetState renderTarget(
+      cmd_buf,
+      {{0, 0}, {CLIPMAP_SIZE, CLIPMAP_SIZE}},
+      {{.image = clipmapImages[cascadeIdx].get(),
+        .view = clipmapImages[cascadeIdx].getView({})}},
+      {});
+
+    cmd_buf.bindPipeline(
+      vk::PipelineBindPoint::eGraphics, clipmapUpdatePipeline.getVkPipeline());
+
+    cmd_buf.bindDescriptorSets(
+      vk::PipelineBindPoint::eGraphics,
+      clipmapUpdatePipeline.getVkPipelineLayout(),
+      0,
+      {set.getVkSet()},
+      {});
+
+    ClipmapPushConstants pc{};
+    pc.worldSize = cascadeWorldSizes[cascadeIdx];
+    pc.cascadeIdx = cascadeIdx;
+    pc.clipmapCenter = glm::vec4(clipmapCenterPos.x, 0.0f, clipmapCenterPos.y, 0.0f);
+
+    cmd_buf.pushConstants<ClipmapPushConstants>(
+      clipmapUpdatePipeline.getVkPipelineLayout(),
+      vk::ShaderStageFlagBits::eFragment,
+      0,
+      {pc});
+
+    cmd_buf.draw(3, 1, 0, 0);
+  }
+
+  for (int i = 0; i < CLIPMAP_CASCADES; ++i)
+  {
+    etna::set_state(
+      cmd_buf,
+      clipmapImages[i].get(),
+      vk::PipelineStageFlagBits2::eFragmentShader,
+      vk::AccessFlagBits2::eShaderSampledRead,
+      vk::ImageLayout::eShaderReadOnlyOptimal,
+      vk::ImageAspectFlagBits::eColor);
+  }
+
+  etna::flush_barriers(cmd_buf);
+}
+
 void WorldRenderer::loadShaders()
 {
 
@@ -352,6 +442,11 @@ void WorldRenderer::loadShaders()
     "grass_render",
     {TERRAIN2_RENDERER_SHADERS_ROOT "grass.vert.spv",
      TERRAIN2_RENDERER_SHADERS_ROOT "grass.frag.spv"});
+
+  etna::create_program(
+    "clipmap_update",
+    {TERRAIN2_RENDERER_SHADERS_ROOT "clipmap_update.vert.spv",
+    TERRAIN2_RENDERER_SHADERS_ROOT "clipmap_update.frag.spv"});
 }
 
 void WorldRenderer::setupPipelines(vk::Format swapchain_format)
@@ -408,6 +503,14 @@ void WorldRenderer::setupPipelines(vk::Format swapchain_format)
           .colorAttachmentFormats = {swapchain_format},
           .depthAttachmentFormat = vk::Format::eD32Sfloat,
         },
+    });
+
+  clipmapUpdatePipeline = pipelineManager.createGraphicsPipeline(
+    "clipmap_update",
+    etna::GraphicsPipeline::CreateInfo{
+      .fragmentShaderOutput = {
+        .colorAttachmentFormats = {vk::Format::eR8G8B8A8Unorm},
+      },
     });
 }
 
@@ -484,6 +587,7 @@ void WorldRenderer::renderTerrain(
       pc.projView = worldViewProj;
       pc.chunkOffset = glm::vec4(cx * chunkSize, cy * chunkSize, chunkSize, chunkSize);
       pc.camPos = glm::vec4(cameraPosition, 0.0f);
+      pc.clipmapCenter = glm::vec4(clipmapCenterPos.x, 0.0f, clipmapCenterPos.y, 0.0f);
 
       cmd_buf.pushConstants<TerrainPushConstants>(
         terrainPipeline.getVkPipelineLayout(),
@@ -615,21 +719,24 @@ void WorldRenderer::renderWorld(
 {
   ETNA_PROFILE_GPU(cmd_buf, renderWorld);
 
+  float dist = glm::length(glm::vec2(cameraPosition.x, cameraPosition.z) - lastUpdatePos);
+  if (dist > CLIPMAP_UPDATE_THRESHOLD)
+  {
+    clipmapCenterPos = glm::vec2(cameraPosition.x, cameraPosition.z);
+    lastUpdatePos = clipmapCenterPos;
+    updateClipmapCascades(cmd_buf);
+  }
+
   auto terrainProgramInfo = etna::get_shader_program("terrain");
   auto terrainSet = etna::create_descriptor_set(
     terrainProgramInfo.getDescriptorLayoutId(0),
     cmd_buf,
     {
       etna::Binding{0, heightmap.genBinding(heightmapSampler.get(), vk::ImageLayout::eShaderReadOnlyOptimal)},
-      etna::Binding{1, splatmap.genBinding(splatmapSampler.get(), vk::ImageLayout::eShaderReadOnlyOptimal)},
-      etna::Binding{2, detailTextures[0].genBinding(detailSampler.get(), vk::ImageLayout::eShaderReadOnlyOptimal)},
-      etna::Binding{3, detailTextures[1].genBinding(detailSampler.get(), vk::ImageLayout::eShaderReadOnlyOptimal)},
-      etna::Binding{4, detailTextures[2].genBinding(detailSampler.get(), vk::ImageLayout::eShaderReadOnlyOptimal)},
-      etna::Binding{5, detailTextures[3].genBinding(detailSampler.get(), vk::ImageLayout::eShaderReadOnlyOptimal)},
-      etna::Binding{6, detailHeightmaps[0].genBinding(detailSampler.get(), vk::ImageLayout::eShaderReadOnlyOptimal)},
-      etna::Binding{7, detailHeightmaps[1].genBinding(detailSampler.get(), vk::ImageLayout::eShaderReadOnlyOptimal)},
-      etna::Binding{8, detailHeightmaps[2].genBinding(detailSampler.get(), vk::ImageLayout::eShaderReadOnlyOptimal)},
-      etna::Binding{9, detailHeightmaps[3].genBinding(detailSampler.get(), vk::ImageLayout::eShaderReadOnlyOptimal)},
+      etna::Binding{1, clipmapImages[0].genBinding(clipmapSampler.get(), vk::ImageLayout::eShaderReadOnlyOptimal)},
+      etna::Binding{2, clipmapImages[1].genBinding(clipmapSampler.get(), vk::ImageLayout::eShaderReadOnlyOptimal)},
+      etna::Binding{3, clipmapImages[2].genBinding(clipmapSampler.get(), vk::ImageLayout::eShaderReadOnlyOptimal)},
+      etna::Binding{4, clipmapImages[3].genBinding(clipmapSampler.get(), vk::ImageLayout::eShaderReadOnlyOptimal)},
     });
 
   etna::flush_barriers(cmd_buf);

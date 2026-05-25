@@ -7,6 +7,7 @@ layout(push_constant) uniform params_t
   mat4 mProjView;
   vec4 chunkOffset;
   vec4 camPos;
+  vec4 clipmapCenter;
 } params;
 
 layout(set = 0, binding = 0) uniform sampler2D heightmapTex;

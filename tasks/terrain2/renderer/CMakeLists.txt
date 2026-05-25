@@ -19,4 +19,6 @@ target_add_shaders(terrain2_renderer
   shaders/grass_placement.comp
   shaders/grass.vert
   shaders/grass.frag
+  shaders/clipmap_update.vert
+  shaders/clipmap_update.frag
 )

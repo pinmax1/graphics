@@ -38,6 +38,8 @@ private:
   void generateHeightmap();
   void generateSplatmap();
   void loadDetailTextures();
+  void allocateClipmapResources();
+  void updateClipmapCascades(vk::CommandBuffer cmd_buf);
   void renderTerrain(vk::CommandBuffer cmd_buf, vk::DescriptorSet descriptorSet);
   void dispatchGrassPlacement(vk::CommandBuffer cmd_buf);
   void renderGrass(vk::CommandBuffer cmd_buf);
@@ -60,6 +62,17 @@ private:
   etna::Image detailHeightmaps[4];
   etna::Sampler detailSampler;
 
+  static constexpr int CLIPMAP_CASCADES = 4;
+  static constexpr uint32_t CLIPMAP_SIZE = 1024;
+  static constexpr float CLIPMAP_UPDATE_THRESHOLD = 2.0f;
+
+  etna::Image clipmapImages[CLIPMAP_CASCADES];
+  etna::Sampler clipmapSampler;
+  glm::vec2 lastUpdatePos = glm::vec2(1e9f);
+  glm::vec2 clipmapCenterPos = glm::vec2(0.0f);
+
+  const float cascadeWorldSizes[CLIPMAP_CASCADES] = {50.0f, 100.0f, 200.0f, 400.0f};
+
   struct PushConstants
   {
     glm::mat4x4 projView;
@@ -71,6 +84,7 @@ private:
     glm::mat4x4 projView;
     glm::vec4 chunkOffset;
     glm::vec4 camPos;
+    glm::vec4 clipmapCenter;
   };
 
   struct GrassPlacementPushConstants
@@ -89,6 +103,14 @@ private:
     float time;
   };
 
+  struct ClipmapPushConstants
+  {
+    float worldSize;
+    int cascadeIdx;
+    float pad0, pad1;
+    glm::vec4 clipmapCenter;
+  };
+
   glm::mat4x4 worldViewProj;
   glm::vec3 cameraPosition;
   float currentTime = 0.0f;
@@ -98,6 +120,7 @@ private:
   etna::GraphicsPipeline terrainPipeline{};
   etna::ComputePipeline grassPlacementPipeline{};
   etna::GraphicsPipeline grassRenderPipeline{};
+  etna::GraphicsPipeline clipmapUpdatePipeline;
 
   etna::Buffer grassInstanceBuffer;
 
